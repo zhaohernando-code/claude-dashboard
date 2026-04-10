@@ -1,23 +1,71 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { listRepos, createRepo, type GHUser, type GHRepo } from '../api/github'
+import { listRepos, listIssues, createRepo, getIssueStatus, type GHUser, type GHRepo } from '../api/github'
+import { useToast } from '../components/Toast'
 
 interface Props {
   user: GHUser
 }
 
+interface RepoStats {
+  pending: number
+  running: number
+  completed: number
+  failed: number
+}
+
 export default function ProjectsPage({ user }: Props) {
   const [repos, setRepos] = useState<GHRepo[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [search, setSearch] = useState('')
   const [showModal, setShowModal] = useState(false)
+  const [repoStats, setRepoStats] = useState<Record<number, RepoStats>>({})
   const navigate = useNavigate()
+  const { showToast } = useToast()
 
-  useEffect(() => {
-    listRepos(user.login)
-      .then(setRepos)
-      .finally(() => setLoading(false))
-  }, [user.login])
+  async function loadRepos(showMsg = false) {
+    try {
+      const data = await listRepos(user.login)
+      setRepos(data)
+      if (showMsg) showToast('已刷新', 'success')
+      // 加载完后异步拉取各项目任务统计
+      loadAllStats(data)
+    } catch {
+      showToast('加载失败', 'error')
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }
+
+  async function loadAllStats(repoList: GHRepo[]) {
+    // 分批并发，每批 3 个，避免触发 rate limit
+    for (let i = 0; i < repoList.length; i += 3) {
+      const batch = repoList.slice(i, i + 3)
+      await Promise.all(batch.map(async (repo) => {
+        try {
+          const issues = await listIssues(user.login, repo.name, 'all')
+          const counts: RepoStats = { pending: 0, running: 0, completed: 0, failed: 0 }
+          for (const issue of issues) {
+            const s = getIssueStatus(issue)
+            if (s) {
+              const key = s.replace('status:', '') as keyof RepoStats
+              counts[key]++
+            }
+          }
+          setRepoStats(prev => ({ ...prev, [repo.id]: counts }))
+        } catch { /* ignore */ }
+      }))
+    }
+  }
+
+  useEffect(() => { loadRepos() }, [user.login])
+
+  async function handleRefresh() {
+    setRefreshing(true)
+    await loadRepos(true)
+  }
 
   const filtered = repos.filter(r =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -28,13 +76,16 @@ export default function ProjectsPage({ user }: Props) {
     <div>
       <div className="page-header">
         <h1>项目列表</h1>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <input
-            style={{ width: 220 }}
+            style={{ width: 180 }}
             placeholder="搜索项目..."
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
+          <button onClick={handleRefresh} disabled={refreshing} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {refreshing ? <><span className="spinner" style={{ width: 12, height: 12 }} /> 刷新中</> : '↻ 刷新'}
+          </button>
           <button className="primary" onClick={() => setShowModal(true)}>+ 新建项目</button>
         </div>
       </div>
@@ -47,31 +98,51 @@ export default function ProjectsPage({ user }: Props) {
         <div className="empty">暂无项目，点击「新建项目」创建</div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {filtered.map(repo => (
-            <div
-              key={repo.id}
-              className="list-item"
-              onClick={() => navigate(`/projects/${user.login}/${repo.name}`)}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600, marginBottom: 2 }}>
-                  {repo.private ? '🔒 ' : '📁 '}{repo.name}
-                </div>
-                {repo.description && (
-                  <div style={{ fontSize: 12, color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {repo.description}
+          {filtered.map(repo => {
+            const stats = repoStats[repo.id]
+            return (
+              <div
+                key={repo.id}
+                className="list-item"
+                onClick={() => navigate(`/projects/${user.login}/${repo.name}`)}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>
+                    {repo.private ? '🔒 ' : '📁 '}{repo.name}
                   </div>
-                )}
+                  {repo.description && (
+                    <div style={{ fontSize: 12, color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {repo.description}
+                    </div>
+                  )}
+                </div>
+                {/* 任务状态统计 */}
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
+                  {stats ? (
+                    <>
+                      {stats.running > 0 && <span className="badge running">{stats.running} 运行</span>}
+                      {stats.pending > 0 && <span className="badge pending">{stats.pending} 待执行</span>}
+                      {stats.failed > 0  && <span className="badge failed">{stats.failed} 失败</span>}
+                      {stats.running === 0 && stats.pending === 0 && stats.failed === 0 && stats.completed > 0 && (
+                        <span className="badge completed">{stats.completed} 完成</span>
+                      )}
+                      {stats.running === 0 && stats.pending === 0 && stats.failed === 0 && stats.completed === 0 && (
+                        <span style={{ fontSize: 11, color: 'var(--text2)' }}>无任务</span>
+                      )}
+                    </>
+                  ) : (
+                    <span style={{ fontSize: 11, color: 'var(--text2)' }}>
+                      {repo.open_issues_count > 0 ? `${repo.open_issues_count} 个任务` : '无任务'}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text2)', whiteSpace: 'nowrap' }}>
+                  {new Date(repo.updated_at).toLocaleDateString('zh-CN')}
+                </div>
+                <span style={{ color: 'var(--text2)' }}>›</span>
               </div>
-              <div style={{ fontSize: 12, color: 'var(--text2)', whiteSpace: 'nowrap' }}>
-                {repo.open_issues_count} 个任务
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--text2)', whiteSpace: 'nowrap' }}>
-                {new Date(repo.updated_at).toLocaleDateString('zh-CN')}
-              </div>
-              <span style={{ color: 'var(--text2)' }}>›</span>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -81,6 +152,7 @@ export default function ProjectsPage({ user }: Props) {
           onCreate={repo => {
             setRepos(prev => [repo, ...prev])
             setShowModal(false)
+            showToast('项目创建成功', 'success')
             navigate(`/projects/${user.login}/${repo.name}`)
           }}
         />
