@@ -66,6 +66,7 @@ export interface GHRepo {
   html_url: string;
   updated_at: string;
   open_issues_count: number;
+  owner: { login: string; avatar_url: string };
 }
 
 export async function listRepos(username: string): Promise<GHRepo[]> {
@@ -161,4 +162,39 @@ export interface GHComment {
 
 export async function listComments(owner: string, repo: string, number: number): Promise<GHComment[]> {
   return req('GET', `/repos/${owner}/${repo}/issues/${number}/comments?per_page=100`);
+}
+
+// ─── Usage ───────────────────────────────────────────────────────────────────
+
+export interface UsageData {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd: number;
+  duration_ms: number;
+}
+
+/**
+ * 从 issue 评论列表中解析 token 用量数据
+ * 查找包含 ```usage-json 代码块的评论
+ */
+export function parseUsageFromComments(comments: GHComment[]): UsageData | null {
+  for (const comment of [...comments].reverse()) {
+    const match = comment.body.match(/```usage-json\n([\s\S]*?)\n```/);
+    if (match) {
+      try {
+        return JSON.parse(match[1]) as UsageData;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return null;
+}
+
+export function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toString();
 }
