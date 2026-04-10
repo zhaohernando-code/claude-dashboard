@@ -5,23 +5,23 @@ import {
   getIssueStatus, STATUS_LABELS, type GHIssue
 } from '../api/github'
 import StatusBadge from '../components/StatusBadge'
+import { useToast } from '../components/Toast'
 
 export default function TasksPage() {
   const { owner, repo } = useParams<{ owner: string; repo: string }>()
   const navigate = useNavigate()
+  const { showToast } = useToast()
   const [issues, setIssues] = useState<GHIssue[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [filter, setFilter] = useState<string>('all')
   const [showModal, setShowModal] = useState(false)
 
   const loadIssues = useCallback(async () => {
     if (!owner || !repo) return
-    try {
-      const data = await listIssues(owner, repo, 'all')
-      setIssues(data)
-    } finally {
-      setLoading(false)
-    }
+    const data = await listIssues(owner, repo, 'all')
+    setIssues(data)
+    setLoading(false)
   }, [owner, repo])
 
   useEffect(() => { loadIssues() }, [loadIssues])
@@ -31,6 +31,18 @@ export default function TasksPage() {
     const t = setInterval(loadIssues, 30000)
     return () => clearInterval(t)
   }, [loadIssues])
+
+  async function handleRefresh() {
+    setRefreshing(true)
+    try {
+      await loadIssues()
+      showToast('已刷新', 'success')
+    } catch {
+      showToast('刷新失败', 'error')
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   const filtered = issues.filter(issue => {
     if (filter === 'all') return true
@@ -45,18 +57,28 @@ export default function TasksPage() {
   async function handleRetry(e: React.MouseEvent, issue: GHIssue) {
     e.stopPropagation()
     if (!owner || !repo) return
-    await retryIssue(owner, repo, issue)
-    loadIssues()
+    try {
+      await retryIssue(owner, repo, issue)
+      await loadIssues()
+      showToast('已重新提交', 'success')
+    } catch {
+      showToast('操作失败', 'error')
+    }
   }
 
   async function handleCancel(e: React.MouseEvent, issue: GHIssue) {
     e.stopPropagation()
     if (!owner || !repo) return
-    const otherLabels = issue.labels
-      .map(l => l.name)
-      .filter(n => !STATUS_LABELS.includes(n as typeof STATUS_LABELS[number]))
-    await setIssueLabels(owner, repo, issue.number, [...otherLabels, 'status:failed'])
-    loadIssues()
+    try {
+      const otherLabels = issue.labels
+        .map(l => l.name)
+        .filter(n => !STATUS_LABELS.includes(n as typeof STATUS_LABELS[number]))
+      await setIssueLabels(owner, repo, issue.number, [...otherLabels, 'status:failed'])
+      await loadIssues()
+      showToast('已取消', 'info')
+    } catch {
+      showToast('操作失败', 'error')
+    }
   }
 
   return (
@@ -72,16 +94,20 @@ export default function TasksPage() {
           <h1>{repo}</h1>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={loadIssues}>↻ 刷新</button>
+          <button onClick={handleRefresh} disabled={refreshing} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {refreshing
+              ? <><span className="spinner" style={{ width: 12, height: 12 }} /> 刷新中</>
+              : '↻ 刷新'}
+          </button>
           <button className="primary" onClick={() => setShowModal(true)}>+ 新建任务</button>
         </div>
       </div>
 
       {/* 状态筛选 */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+      <div className="filter-bar" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         <button
           onClick={() => setFilter('all')}
-          style={{ opacity: filter === 'all' ? 1 : 0.6 }}
+          style={{ opacity: filter === 'all' ? 1 : 0.6, whiteSpace: 'nowrap' }}
         >全部 ({issues.length})</button>
         {STATUS_LABELS.map(label => {
           const key = label.replace('status:', '') as 'pending' | 'running' | 'completed' | 'failed'
@@ -89,7 +115,7 @@ export default function TasksPage() {
             <button
               key={label}
               onClick={() => setFilter(label)}
-              style={{ opacity: filter === label ? 1 : 0.6 }}
+              style={{ opacity: filter === label ? 1 : 0.6, whiteSpace: 'nowrap' }}
             >
               <StatusBadge status={key} /> {counts[label] || 0}
             </button>
@@ -149,7 +175,11 @@ export default function TasksPage() {
           owner={owner}
           repo={repo}
           onClose={() => setShowModal(false)}
-          onCreate={() => { setShowModal(false); loadIssues() }}
+          onCreate={() => {
+            setShowModal(false)
+            loadIssues()
+            showToast('任务已创建，等待执行', 'success')
+          }}
         />
       )}
     </div>
